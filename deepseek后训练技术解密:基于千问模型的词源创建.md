@@ -151,4 +151,126 @@ download_qwen3_tokenizer(kind="base", out_dir="qwen3")
 ```py
 python .\tokenizer.py
 ```
-执行完毕后就可以看到本地目录多了一个文件夹"qwen3",里面放置着一个json文件：tokenizer-base.json，这个文件将用于把输入模型的字符串中对应的单词或者文字转换为词源数字。
+执行完毕后就可以看到本地目录多了一个文件夹"qwen3",里面放置着一个json文件：tokenizer-base.json，这个文件将用于把输入模型的字符串中对应的单词或者文字转换为词源数字。接下来我们创建一个新的本地文件qwen_tokenizer.py，然后给出代码如下:
+```py
+
+import re
+import sys
+from pathlib import Path
+
+class Qwen3Tokenizer:
+    _SPECIALS = [
+        "<|endoftext|>",
+        "<|im_start|>", "<|im_end|>",
+        "<|object_ref_start|>", "<|object_ref_end|>",
+        "<|box_start|>", "<|box_end|>",
+        "<|quad_start|>", "<|quad_end|>",
+        "<|vision_start|>", "<|vision_end|>",
+        "<|vision_pad|>", "<|image_pad|>", "<|video_pad|>",
+    ]
+    _SPLIT_RE = re.compile(r"(<\|[^>]+?\|>)")
+
+    def __init__(self, tokenizer_file_path="tokenizer-base.json",
+                 apply_chat_template=False,
+                 add_generation_prompt=False,
+                 add_thinking=False):
+        from tokenizers import Tokenizer
+
+        self.apply_chat_template = apply_chat_template
+        self.add_generation_prompt = add_generation_prompt
+        self.add_thinking = add_thinking
+
+        tok_path = Path(tokenizer_file_path)
+        if not tok_path.is_file():
+            raise FileNotFoundError(
+                f"Tokenizer file '{tok_path}' not found. Please ensure it's available."
+            )
+
+        self._tok = Tokenizer.from_file(str(tok_path))
+        self._special_to_id = {t: self._tok.token_to_id(t) for t in self._SPECIALS}
+
+        self.pad_token = "<|endoftext|>"
+        self.pad_token_id = self._special_to_id.get(self.pad_token)
+
+        # Match HF behavior: chat model → <|im_end|>, base model → <|endoftext|>
+        fname = tok_path.name.lower()
+        if "base" in fname and "reasoning" not in fname:
+            self.eos_token = "<|endoftext|>"
+        else:
+            self.eos_token = "<|im_end|>"
+        self.eos_token_id = self._special_to_id.get(self.eos_token)
+
+    def encode(self, prompt, chat_wrapped=None):
+        if chat_wrapped is None:
+            chat_wrapped = self.apply_chat_template
+
+        stripped = prompt.strip()
+        if stripped in self._special_to_id and "\n" not in stripped:
+            return [self._special_to_id[stripped]]
+
+        if chat_wrapped:
+            prompt = self._wrap_chat(prompt)
+
+        ids = []
+        for part in filter(None, self._SPLIT_RE.split(prompt)):
+            if part in self._special_to_id:
+                ids.append(self._special_to_id[part])
+            else:
+                ids.extend(self._tok.encode(part).ids)
+        return ids
+
+    def decode(self, token_ids):
+        return self._tok.decode(token_ids, skip_special_tokens=False)
+
+    def _wrap_chat(self, user_msg):
+        s = f"<|im_start|>user\n{user_msg}<|im_end|>\n"
+        if self.add_generation_prompt:
+            s += "<|im_start|>assistant"
+            if self.add_thinking:
+                s += "\n"  # insert no <think> tag, just a new line
+            else:
+                s += "\n<think>\n\n</think>\n\n"
+        return s
+```
+我们不用关心上面代码的逻辑，它跟我们研究的主题没有关系，只是在研究过程中我们需要使用它。有了上面代码后我们创建一个新的文件map_input2tokens.py,然后使用代码如下:
+```py
+from qwen_tokenizer import Qwen3Tokenizer
+tokenizer = Qwen3Tokenizer(tokenizer_file_path="qwen3/tokenizer-base.json")
+prompt="Explain large language models in simple terms."
+input_token_ids_list=tokenizer.encode(prompt)
+print(f"Input token IDs: {input_token_ids_list}")
+for i in input_token_ids_list:
+    print(f"{i} --> {tokenizer.decode([i])}")
+
+prompt="中华人民共和国反间谍法"
+input_token_ids_list=tokenizer.encode(prompt)
+print(f"Input token IDs: {input_token_ids_list}")
+for i in input_token_ids_list:
+    print(f"{i} --> {tokenizer.decode([i])}")
+```
+然后执行如下命令运行上面代码:
+```py
+python .\map_input2tokeners.py
+```
+然后可以看到如下输出:
+```py
+Input token IDs: [840, 20772, 3460, 4128, 4119, 304, 4285, 3793, 13]
+840 --> Ex
+20772 --> plain
+3460 -->  large
+4128 -->  language
+4119 -->  models
+304 -->  in
+4285 -->  simple
+3793 -->  terms
+13 --> .
+Input token IDs: [105492, 104773, 94443, 17881, 119280, 24339]
+105492 --> 中华人民
+104773 --> 共和国
+94443 --> 反
+17881 --> 间
+119280 --> 谍
+24339 --> 法
+```
+从上面输出我们看到"Explain"在转换为词源时被拆解成"Ex"和"plain"两部分，然后分别对应词源数值840和20772.对于中文而言也有点出乎意料，通常我们会以为每个汉字对应一个词源，但是运行结果可以看到"中华人民"这个词组被看做一个统一单元，然后被转换为一个词源数值105492，“共和国”这个词组被统一看成一个单元，然后转换为词源数值104773，其他的汉字各自单独形成一个词源数值。
+
